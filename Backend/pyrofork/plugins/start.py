@@ -33,8 +33,9 @@ async def send_start_message(client: Client, message: Message):
             await message.reply_text(
                 '🎉 <b>Welcome to the VFlix Exclusive Telegram Stremio Media Server!</b>\n\n'
                 'Here is your personal Stremio Addon link:\n\n'
-                '🎬 <b>Stremio Addon — Install Link:</b>\n'
+                '🎬 <b>TG Stremio Addon — Install Link:</b>\n'
                 f'<code>{addon_url}</code>\n\n'
+                '✨ <b>Cloud Stremio Addon — Install Link:</b>\n'
                 f'<code>{cloudAddon_url}</code>\n\n'
                 'Tap the link above → <b>Install</b> in Stremio to start watching!',
                 quote=True,
@@ -90,8 +91,9 @@ async def send_start_message(client: Client, message: Message):
         await message.reply_text(
             '🎉 <b>Welcome back to the VFlix Exclusive Telegram Stremio Subscription Manager!</b>\n\n'
             'Your subscription is active. Here is your personal addon link:\n\n'
-            '🎬 <b>Stremio Addon — Install Link:</b>\n'
+            '🎬 <b>TG Stremio Addon — Install Link:</b>\n'
             f'<code>{addon_url}</code>\n\n'
+            '✨ <b>Cloud Stremio Addon — Install Link:</b>\n'
             f'<code>{cloudAddon_url}</code>\n\n'
             'Tap the link above → <b>Install</b> in Stremio to start watching!',
             quote=True,
