@@ -72,6 +72,7 @@ from Backend.helper.subtitles import (
 )
 from Backend.logger import LOGGER
 import Backend.pyrofork.bot as botmod
+from Backend.helper.announcer import delete_announcement_async
 from Backend.pyrofork.bot import (
     StreamBot,
     client_avg_mbps,
@@ -80,6 +81,31 @@ from Backend.pyrofork.bot import (
     multi_clients,
     work_loads,
 )
+
+
+
+
+def _coerce_tmdb_id(value):
+    """Accept int or string; treat 'null'/''/None as missing."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    s = str(value).strip()
+    if not s or s.lower() in ("null", "none", "undefined"):
+        return None
+    try:
+        return int(float(s))
+    except (TypeError, ValueError):
+        return None
+
+
+def _require_tmdb_id(value) -> int:
+    tid = _coerce_tmdb_id(value)
+    if tid is None:
+        raise HTTPException(status_code=400, detail="tmdb_id is required and must be an integer")
+    return tid
+
 
 
 #----- System stats
@@ -154,14 +180,17 @@ async def list_media_api(
         raise HTTPException(status_code=500, detail=str(e))
 
 async def delete_media_api(
-    tmdb_id: int,
+    tmdb_id: str | int,
     db_index: int,
     media_type: str = Query(regex="^(movie|tv)$")
 ):
+    tmdb_id = _require_tmdb_id(tmdb_id)
     try:
         media_type_formatted = "Movie" if media_type == "movie" else "Series"
         result = await db.delete_document(media_type_formatted, tmdb_id, db_index)
         if result:
+            # Remove matching announcement post from the announcement channel
+            delete_announcement_async(media_type, tmdb_id)
             return {"message": "Media deleted successfully"}
         else:
             raise HTTPException(status_code=404, detail="Media not found")
@@ -170,10 +199,11 @@ async def delete_media_api(
 
 async def update_media_api(
     request: Request,
-    tmdb_id: int,
+    tmdb_id: str | int,
     db_index: int,
     media_type: str = Query(regex="^(movie|tv)$")
 ):
+    tmdb_id = _require_tmdb_id(tmdb_id)
     try:
         update_data = await request.json()
         if 'rating' in update_data and update_data['rating']:
@@ -227,10 +257,11 @@ async def update_media_api(
         raise HTTPException(status_code=500, detail=str(e))
 
 async def get_media_details_api(
-    tmdb_id: int,
+    tmdb_id: str | int,
     db_index: int,
     media_type: str = Query(regex="^(movie|tv)$")
 ):
+    tmdb_id = _require_tmdb_id(tmdb_id)
     try:
         result = await db.get_document(media_type, tmdb_id, db_index)
         if result:
@@ -240,7 +271,8 @@ async def get_media_details_api(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-async def delete_movie_quality_api(tmdb_id: int, db_index: int, id: str):
+async def delete_movie_quality_api(tmdb_id: str | int, db_index: int, id: str):
+    tmdb_id = _require_tmdb_id(tmdb_id)
     try:
         result = await db.delete_movie_quality(tmdb_id, db_index, id)
         if result:
@@ -251,8 +283,9 @@ async def delete_movie_quality_api(tmdb_id: int, db_index: int, id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 async def delete_tv_quality_api(
-    tmdb_id: int, db_index: int, season: int, episode: int, id: str
+    tmdb_id: str | int, db_index: int, season: int, episode: int, id: str
 ):
+    tmdb_id = _require_tmdb_id(tmdb_id)
     try:
         result = await db.delete_tv_quality(tmdb_id, db_index, season, episode, id)
         if result:
@@ -263,8 +296,9 @@ async def delete_tv_quality_api(
         raise HTTPException(status_code=500, detail=str(e))
 
 async def delete_tv_episode_api(
-    tmdb_id: int, db_index: int, season: int, episode: int
+    tmdb_id: str | int, db_index: int, season: int, episode: int
 ):
+    tmdb_id = _require_tmdb_id(tmdb_id)
     try:
         result = await db.delete_tv_episode(tmdb_id, db_index, season, episode)
         if result:
@@ -274,7 +308,8 @@ async def delete_tv_episode_api(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-async def delete_tv_season_api(tmdb_id: int, db_index: int, season: int):
+async def delete_tv_season_api(tmdb_id: str | int, db_index: int, season: int):
+    tmdb_id = _require_tmdb_id(tmdb_id)
     try:
         result = await db.delete_tv_season(tmdb_id, db_index, season)
         if result:
@@ -398,10 +433,11 @@ async def _resolve_speed_test_target(quality_id: str):
 #----- Run a parallel download speed test across all connected clients
 async def speed_test_api(
     quality_id: str = Query(..., description="Encoded quality ID from DB"),
-    tmdb_id: int = Query(...),
+    tmdb_id: str | int = Query(...),
     db_index: int = Query(...),
     media_type: str = Query(..., regex="^(movie|tv)$"),
 ):
+    tmdb_id = _require_tmdb_id(tmdb_id)
     try:
         chat_id, msg_id, decoded = await _resolve_speed_test_target(quality_id)
         if not chat_id or not msg_id:
@@ -422,11 +458,12 @@ async def speed_test_api(
 #----- SSE speed test streaming per-client results as they finish
 async def speed_test_stream_api(
     quality_id: str,
-    tmdb_id: int,
+    tmdb_id: str | int,
     db_index: int,
     media_type: str,
 ):
 
+    tmdb_id = _require_tmdb_id(tmdb_id)
     async def event_generator():
         try:
             chat_id, msg_id, decoded = await _resolve_speed_test_target(quality_id)
@@ -649,10 +686,11 @@ async def add_subscription_plan_api(payload: dict) -> dict:
     try:
         days = int(payload.get("days", 0))
         price = float(payload.get("price", 0.0))
+        currency = str(payload.get("currency") or "INR").upper().strip()
         if days <= 0 or price < 0:
             raise HTTPException(status_code=400, detail="Invalid plan parameters")
             
-        plan_id = await db.add_subscription_plan(days, price)
+        plan_id = await db.add_subscription_plan(days, price, currency)
         if plan_id:
             return {"status": "success", "message": "Plan added successfully", "plan_id": plan_id}
         else:
@@ -666,10 +704,11 @@ async def update_subscription_plan_api(plan_id: str, payload: dict) -> dict:
     try:
         days = int(payload.get("days", 0))
         price = float(payload.get("price", 0.0))
+        currency = str(payload.get("currency") or "INR").upper().strip()
         if days <= 0 or price < 0:
              raise HTTPException(status_code=400, detail="Invalid plan parameters")
              
-        success = await db.update_subscription_plan(plan_id, days, price)
+        success = await db.update_subscription_plan(plan_id, days, price, currency)
         if success:
              return {"status": "success", "message": "Plan updated successfully"}
         else:
@@ -945,7 +984,8 @@ async def search_media_rescan_api(media_type: str, query: str, year: int | None 
     return {"results": results}
 
 
-async def apply_media_rescan_api(request: Request, tmdb_id: int, db_index: int, media_type: str):
+async def apply_media_rescan_api(request: Request, tmdb_id: str | int, db_index: int, media_type: str):
+    tmdb_id = _require_tmdb_id(tmdb_id)
     body = await request.json()
     selected_id = str(body.get("selected_id") or "").strip()
 
@@ -1041,6 +1081,7 @@ async def resolve_subtitle_api(payload: dict) -> dict:
 
 
 async def _resolve_imdb_id(media_type: str, tmdb_id, db_index) -> str:
+    tmdb_id = _coerce_tmdb_id(tmdb_id)
     if not (tmdb_id and db_index):
         raise HTTPException(status_code=400, detail="tmdb_id and db_index are required.")
     doc = await db.get_document(media_type, int(tmdb_id), int(db_index))
@@ -1054,6 +1095,7 @@ def list_subtitle_languages_api() -> dict:
 
 
 async def list_subtitles_api(media_type: str, tmdb_id, db_index) -> dict:
+    tmdb_id = _require_tmdb_id(tmdb_id)
     mt = "tv" if media_type in ("tv", "series") else "movie"
     imdb_id = await _resolve_imdb_id(mt, tmdb_id, db_index)
     return {"status": "success", "subtitles": await list_title_subtitles(imdb_id)}
@@ -1341,7 +1383,7 @@ def _normalize_media_type(media_type: str) -> str:
 
 
 async def list_custom_catalogs_api(
-    tmdb_id: int | None = None,
+    tmdb_id: str | int | None = None,
     db_index: int | None = None,
     media_type: str | None = None,
 ):
@@ -1442,7 +1484,8 @@ async def set_media_visibility_api(payload: dict):
 
 
 #----- Current effective visibility of a title (from the catalogs it belongs to)
-async def get_media_visibility_api(tmdb_id: int, db_index: int, media_type: str):
+async def get_media_visibility_api(tmdb_id: str | int, db_index: int, media_type: str):
+    tmdb_id = _require_tmdb_id(tmdb_id)
     data = await db.get_media_visibility(int(tmdb_id), int(db_index), _normalize_media_type(media_type))
     return {"visibility": data or {}}
 
@@ -1525,10 +1568,11 @@ async def add_custom_catalog_item_api(catalog_id: str, payload: dict):
 
 async def remove_custom_catalog_item_api(
     catalog_id: str,
-    tmdb_id: int,
+    tmdb_id: str | int,
     db_index: int,
     media_type: str,
 ):
+    tmdb_id = _require_tmdb_id(tmdb_id)
     catalog = await db.get_custom_catalog(catalog_id)
     if not catalog:
         raise HTTPException(status_code=404, detail="Catalog not found.")
@@ -1681,7 +1725,6 @@ async def session_remove_api():
 async def get_settings_api() -> dict:
 
     data = SettingsManager.current().to_dict()
-    #----- Never expose the raw password; only whether one is set
     data["admin_password_set"] = bool(data.get("admin_password"))
     data["admin_password"] = ""
     data["session_secret_set"] = bool(data.get("session_secret"))
@@ -1692,6 +1735,23 @@ async def get_settings_api() -> dict:
     except Exception as e:
         LOGGER.error(f"get_settings_api: could not load database list: {e}")
         data["database_list"] = []
+
+    active = SettingsManager._all_channel_ids(data)
+    titles = data.get("channel_titles") or {}
+    if not isinstance(titles, dict):
+        titles = {}
+    titles = {str(k): str(v) for k, v in titles.items() if str(k) in active and v}
+    missing = [cid for cid in active if cid not in titles]
+    if missing:
+        full = SettingsManager.current().to_dict()
+        await SettingsManager._sync_channel_titles(full)
+        try:
+            await db.save_settings(full)
+            SettingsManager._current = SettingsManager.current().__class__(full)
+        except Exception as e:
+            LOGGER.warning(f"get_settings_api: could not persist channel titles: {e}")
+        titles = full.get("channel_titles") or {}
+    data["channel_titles"] = {str(k): str(v) for k, v in (titles or {}).items() if k and v}
 
     return {"settings": data}
 
@@ -1761,50 +1821,58 @@ async def update_settings_api(payload: dict) -> dict:
             payload["subscription_group_id"] = int(payload["subscription_group_id"])
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="'subscription_group_id' must be an integer.")
+    def _validate_channel_id(channel: str, field: str) -> str:
+        channel = str(channel).strip()
+        if not channel:
+            return ""
+        if not channel.startswith("-100") or not channel[4:].isdigit() or len(channel) < 8:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid {field}: '{channel}'. Only channel IDs in -100xxxxxxxxxx format are accepted (channels only, no groups/users/bots)."
+            )
+        return channel
+
+    if "auth_channels" in payload:
+        cleaned = []
+        for channel in payload["auth_channels"]:
+            c = _validate_channel_id(channel, "auth channel")
+            if c:
+                cleaned.append(c)
+        payload["auth_channels"] = cleaned
+
     if "global_search_channels" in payload:
         cleaned = []
         for channel in payload["global_search_channels"]:
-            channel = str(channel).strip()
-            if not channel:
-                continue
-            try:
-                int(channel)
-            except ValueError:
-                raise HTTPException(status_code=400,
-                    detail=f"Invalid channel id: {channel}"
-                    )
-            cleaned.append(channel)
+            c = _validate_channel_id(channel, "global search channel")
+            if c:
+                cleaned.append(c)
         payload["global_search_channels"] = cleaned
 
     if "anime_channels" in payload:
         cleaned = []
         for channel in payload["anime_channels"]:
-            channel = str(channel).strip()
-            if not channel:
-                continue
-            try:
-                int(channel.replace("-100", ""))
-            except ValueError:
-                raise HTTPException(status_code=400,
-                    detail=f"Invalid anime channel id: {channel}"
-                    )
-            cleaned.append(channel)
+            c = _validate_channel_id(channel, "anime channel")
+            if c:
+                cleaned.append(c)
         payload["anime_channels"] = cleaned
 
     if "manual_channels" in payload:
         cleaned = []
         for channel in payload["manual_channels"]:
-            channel = str(channel).strip()
-            if not channel:
-                continue
-            try:
-                int(channel.replace("-100", ""))
-            except ValueError:
-                raise HTTPException(status_code=400,
-                    detail=f"Invalid manual channel id: {channel}"
-                    )
-            cleaned.append(channel)
+            c = _validate_channel_id(channel, "manual channel")
+            if c:
+                cleaned.append(c)
         payload["manual_channels"] = cleaned
+
+    if "announcement_channel" in payload and payload["announcement_channel"]:
+        payload["announcement_channel"] = _validate_channel_id(
+            payload["announcement_channel"], "announcement channel"
+        )
+
+    if "skip_channel" in payload and payload["skip_channel"]:
+        payload["skip_channel"] = _validate_channel_id(
+            payload["skip_channel"], "skip channel"
+        )
 
     #----- The same channel id may not appear in more than one channel field.
     #----- Only AUTH ∩ ANIME is allowed, because an anime channel is an auth channel
@@ -2295,6 +2363,8 @@ async def setup_status_api() -> dict:
     checks = [
         {"key": "tmdb", "label": "TMDB API key", "done": bool(s.tmdb_api),
          "hint": "Powers automatic poster & metadata matching."},
+        {"key": "tvdb", "label": "TVDB API key", "done": bool(s.tvdb_api),
+         "hint": "Improves TV show matching; used after TMDB / with anime pipelines."},
         {"key": "channels", "label": "AUTH channel added", "done": len(s.auth_channels) > 0,
          "hint": "The channel(s) the bot indexes and streams from."},
         {"key": "base_url", "label": "Base URL set", "done": bool(s.base_url),
