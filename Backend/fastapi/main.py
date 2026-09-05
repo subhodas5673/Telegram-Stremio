@@ -2,11 +2,12 @@ import asyncio
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from Backend import __version__
+from Backend.fastapi.themes import DEFAULT_THEME, DEFAULT_STYLE, get_theme
 from Backend.fastapi.routes.api_routes import (
     add_custom_catalog_item_api,
     add_subscription_plan_api,
@@ -115,6 +116,7 @@ from Backend.fastapi.routes.api_routes import (
 from Backend.fastapi.routes.stream_routes import decay_client_failures
 from Backend.fastapi.routes.stream_routes import router as stream_router
 from Backend.fastapi.routes.stremio_routes import router as stremio_router
+from Backend.fastapi.routes.webdav_routes import router as webdav_router
 from Backend.fastapi.routes.template_routes import (
     admin_access_page,
     admin_dashboard_page,
@@ -168,6 +170,7 @@ async def _startup():
 #----- Streaming and Stremio routers
 app.include_router(stream_router)
 app.include_router(stremio_router)
+app.include_router(webdav_router)
 
 
 #----- Public routes (no authentication)
@@ -184,8 +187,74 @@ async def logout_route(request: Request):
     return await logout(request)
 
 @app.post("/set-theme")
-async def set_theme_route(request: Request, theme: str = Form(...)):
-    return await set_theme(request, theme)
+async def set_theme_route(request: Request, theme: str = Form(None), style: str = Form(None)):
+    return await set_theme(request, theme, style)
+
+@app.get("/manifest.webmanifest")
+async def pwa_manifest(request: Request):
+    theme_name = request.session.get("theme", DEFAULT_THEME)
+    style_name = request.session.get("style", DEFAULT_STYLE)
+    theme = get_theme(theme_name, style_name)
+    return JSONResponse(
+        {
+            "name": "Telegram Stremio",
+            "short_name": "TG Stremio",
+            "description": "Telegram Stremio media management",
+            "start_url": "/",
+            "scope": "/",
+            "display": "standalone",
+            "orientation": "any",
+            "background_color": theme["colors"]["background"],
+            "theme_color": theme["colors"]["primary"],
+            "icons": [
+                {
+                    "src": "/pwa-icon.svg",
+                    "sizes": "any",
+                    "type": "image/svg+xml",
+                    "purpose": "any"
+                },
+                {
+                    "src": "/pwa-icon.svg",
+                    "sizes": "any",
+                    "type": "image/svg+xml",
+                    "purpose": "maskable"
+                }
+            ]
+        },
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "no-cache"}
+    )
+
+@app.get("/pwa-icon.svg")
+async def pwa_icon(request: Request):
+    theme_name = request.session.get("theme", DEFAULT_THEME)
+    style_name = request.session.get("style", DEFAULT_STYLE)
+    theme = get_theme(theme_name, style_name)
+    primary = theme["colors"]["primary"]
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">'
+        f'<rect width="512" height="512" rx="96" fill="{primary}"/>'
+        f'<path d="M200 152l176 104-176 104z" fill="white"/>'
+        f'</svg>'
+    )
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "no-cache"}
+    )
+
+@app.get("/sw.js")
+async def service_worker():
+    js = (
+        "self.addEventListener('install',e=>self.skipWaiting());"
+        "self.addEventListener('activate',e=>e.waitUntil(clients.claim()));"
+        "self.addEventListener('fetch',e=>e.respondWith(fetch(e.request).catch(()=>caches.match(e.request))));"
+    )
+    return Response(
+        content=js,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"}
+    )
 
 @app.get("/status", response_class=HTMLResponse)
 async def public_status(request: Request):
@@ -314,7 +383,7 @@ async def get_stream_analytics(_: bool = Depends(require_auth)):
     return await get_stream_analytics_api()
 
 @app.get("/api/admin/user-activity")
-async def get_user_activity(page: int = 1, per_page: int = 12, _: bool = Depends(require_auth)):
+async def get_user_activity(page: int = 1, per_page: int = 5, _: bool = Depends(require_auth)):
     return await get_user_activity_api(page, per_page)
 
 @app.post("/api/admin/clear-analytics")
@@ -780,4 +849,14 @@ async def tools_duplicates_purge(payload: dict | None = None, _: bool = Depends(
 
 @app.exception_handler(401)
 async def auth_exception_handler(request: Request, exc):
+    # API / stream / WebDAV clients must receive a real 401, not an HTML login redirect.
+    path = request.url.path or ""
+    if path.startswith(("/webdav", "/dl/", "/sub/", "/stremio/", "/api/", "/thumb/")):
+        from fastapi.responses import JSONResponse
+        detail = getattr(exc, "detail", "Unauthorized")
+        headers = {}
+        # Preserve WWW-Authenticate for WebDAV Basic auth prompts
+        if hasattr(exc, "headers") and exc.headers:
+            headers.update(exc.headers)
+        return JSONResponse(status_code=401, content={"detail": detail}, headers=headers)
     return RedirectResponse(url="/login", status_code=302)

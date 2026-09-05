@@ -21,6 +21,44 @@ from Backend.pyrofork.bot import client_avg_mbps, client_dc_map, client_failures
 
 ACTIVE_STREAMS: Dict[str, Dict] = {}
 RECENT_STREAMS = deque(maxlen=20)
+STALE_STREAM_IDLE = 180
+_STALE_CLEANER_STARTED = False
+
+
+async def _cleanup_stale_streams():
+    while True:
+        try:
+            await asyncio.sleep(30)
+            now = time.time()
+            stale = []
+            for sid, entry in list(ACTIVE_STREAMS.items()):
+                last = entry.get("last_ts") or entry.get("start_ts") or 0
+                status = entry.get("status") or "active"
+                total = entry.get("total_bytes") or 0
+                idle = now - last
+                if status != "active" or idle > STALE_STREAM_IDLE or (total == 0 and idle > 60):
+                    stale.append(sid)
+            for sid in stale:
+                try:
+                    entry = ACTIVE_STREAMS.pop(sid, None)
+                    if entry:
+                        entry["status"] = "stale"
+                        entry["end_ts"] = now
+                        RECENT_STREAMS.appendleft(entry)
+                        idx = entry.get("client_index")
+                        if idx is not None and idx in work_loads:
+                            work_loads[idx] = max(0, work_loads[idx] - 1)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
+def _ensure_stale_cleaner():
+    global _STALE_CLEANER_STARTED
+    if not _STALE_CLEANER_STARTED:
+        _STALE_CLEANER_STARTED = True
+        asyncio.create_task(_cleanup_stale_streams())
 
 
 #----- Telegram file byte streamer with prefetch, multi-client parallelism, and telemetry
@@ -32,12 +70,13 @@ class ByteStreamer:
     def __init__(self, client: Client, client_index: int = -1):
         self.client = client
         self.client_index = client_index
-        self._file_id_cache: Dict[int, FileId] = {}
+        self._file_id_cache: Dict[Tuple[int, int], FileId] = {}
         self._session_lock = asyncio.Lock()
         if client_index >= 0:
             ByteStreamer._instances[client_index] = self
         asyncio.create_task(self._clean_cache())
         asyncio.create_task(self._prewarm_sessions())
+        _ensure_stale_cleaner()
 
     async def _prewarm_sessions(self):
         common_dcs = [1, 2, 4, 5]
@@ -75,13 +114,14 @@ class ByteStreamer:
 
     #----- Fetch (and cache) Telegram FileId properties for a message
     async def get_file_properties(self, chat_id: int, message_id: int) -> FileId:
-        if message_id not in self._file_id_cache:
+        cache_key = (int(chat_id), int(message_id))
+        if cache_key not in self._file_id_cache:
             file_id = await get_file_ids(self.client, int(chat_id), int(message_id))
             if not file_id:
-                LOGGER.warning("Message %s not found", message_id)
+                LOGGER.warning("Message %s not found in chat %s", message_id, chat_id)
                 raise FileNotFound
-            self._file_id_cache[message_id] = file_id
-        return self._file_id_cache[message_id]
+            self._file_id_cache[cache_key] = file_id
+        return self._file_id_cache[cache_key]
 
     #----- Build a prefetching, range-aware streaming generator for a file
     async def prefetch_stream(
@@ -139,14 +179,15 @@ class ByteStreamer:
                 if not chat_id or not message_id:
                     return False
                 try:
-                    streamer_ref._file_id_cache.pop(message_id, None)
+                    cache_key = (int(chat_id), int(message_id))
+                    streamer_ref._file_id_cache.pop(cache_key, None)
                     fresh = await get_file_ids(streamer_ref.client, chat_id, message_id)
                     if fresh:
-                        streamer_ref._file_id_cache[message_id] = fresh
+                        streamer_ref._file_id_cache[cache_key] = fresh
                         loc_b[0] = await ByteStreamer._get_location(fresh)
                         return True
                 except Exception as exc:
-                    LOGGER.warning("Location refresh failed for msg_id=%s: %s", message_id, exc)
+                    LOGGER.warning("Location refresh failed for chat=%s msg_id=%s: %s", chat_id, message_id, exc)
                 return False
             return _refresh
 
