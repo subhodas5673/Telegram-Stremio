@@ -19,7 +19,9 @@ async def send_start_message(client: Client, message: Message):
     try:
         user_id = (message.from_user.id if message.from_user else None) or (message.sender_chat.id if message.sender_chat else None) or message.chat.id
         base_url = SettingsManager.current().base_url
+        cloud_url = "https://cloud.vflix.shop"
         addon_url = f"{base_url}/stremio/manifest.json"
+        cloud_addon_url = f"{cloud_url}/stremio/manifest.json"
 
         #----- No subscription mode: owner-only, single personal token
         if not SettingsManager.current().subscription:
@@ -29,14 +31,17 @@ async def send_start_message(client: Client, message: Message):
             try:
                 token_doc = await db.add_api_token(name=user_name, user_id=user_id)
                 addon_url = f"{base_url}/stremio/{token_doc.get('token')}/manifest.json"
+                cloud_addon_url = f"{cloud_url}/stremio/{token_doc.get('token')}/manifest.json"
             except Exception as e:
                 LOGGER.error(f"Error ensuring token for free user: {e}")
 
             await message.reply_text(
                 '🎉 <b>Welcome to the Telegram Stremio Media Server!</b>\n\n'
                 'Here is your personal Stremio Addon link:\n\n'
-                '🎬 <b>Stremio Addon — Install Link:</b>\n'
+                '🎬 <b>TG Stremio Addon — Install Link:</b>\n'
                 f'<code>{addon_url}</code>\n\n'
+                f'🎬 <b>Cloud Stremio Addon — Install Link:</b>\n'
+                f'<code>{cloud_addon_url}</code>\n\n'
                 'Tap the link above → <b>Install</b> in Stremio to start watching!',
                 quote=True,
                 parse_mode=enums.ParseMode.HTML
@@ -86,12 +91,15 @@ async def send_start_message(client: Client, message: Message):
         token_doc = await db.ensure_api_token_for_user(user_id, user_name)
         if token_doc and token_doc.get("token"):
             addon_url = f"{base_url}/stremio/{token_doc['token']}/manifest.json"
+            cloud_addon_url = f"{cloud_url}/stremio/{token_doc['token']}/manifest.json"
 
         await message.reply_text(
             '🎉 <b>Welcome back to the Telegram Stremio Subscription Manager!</b>\n\n'
             'Your subscription is active. Here is your personal addon link:\n\n'
-            '🎬 <b>Stremio Addon — Install Link:</b>\n'
+            '🎬 <b>TG Stremio Addon — Install Link:</b>\n'
             f'<code>{addon_url}</code>\n\n'
+            '🎬 <b>Cloud Stremio Addon — Install Link:</b>\n'
+            f'<code>{cloud_addon_url}</code>\n\n'
             'Tap the link above → <b>Install</b> in Stremio to start watching!',
             quote=True,
             parse_mode=enums.ParseMode.HTML
